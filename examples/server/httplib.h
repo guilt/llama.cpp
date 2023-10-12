@@ -204,7 +204,6 @@ using socket_t = int;
 #include <cassert>
 #include <cctype>
 #include <climits>
-#include <condition_variable>
 #include <cstring>
 #include <errno.h>
 #include <fcntl.h>
@@ -222,7 +221,14 @@ using socket_t = int;
 #include <sstream>
 #include <string>
 #include <sys/stat.h>
+
+#if defined(__MINGW32__) && defined(_USE_MINGW_COMPAT)
+#include <mingw.condition_variable.h>
+#include <mingw.thread.h>
+#else
+#include <condition_variable>
 #include <thread>
+#endif
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
 #ifdef _WIN32

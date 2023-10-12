@@ -1,5 +1,5 @@
 set(TARGET beam-search)
 add_executable(${TARGET} beam-search.cpp)
-install(TARGETS ${TARGET} RUNTIME)
+install(TARGETS ${TARGET} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_11)

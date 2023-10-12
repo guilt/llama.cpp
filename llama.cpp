@@ -66,15 +66,21 @@
 #include <initializer_list>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <numeric>
 #include <queue>
 #include <random>
 #include <regex>
 #include <sstream>
-#include <thread>
 #include <unordered_map>
 #include <set>
+
+#if defined(__MINGW32__) && defined(_USE_MINGW_COMPAT)
+#include <mingw.mutex.h>
+#include <mingw.thread.h>
+#else
+#include <mutex>
+#include <thread>
+#endif
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
@@ -101,6 +107,7 @@ static void llama_log_callback_default(ggml_log_level level, const char * text, 
 #define LLAMA_LOG_INFO(...)  llama_log_internal(GGML_LOG_LEVEL_INFO , __VA_ARGS__)
 #define LLAMA_LOG_WARN(...)  llama_log_internal(GGML_LOG_LEVEL_WARN , __VA_ARGS__)
 #define LLAMA_LOG_ERROR(...) llama_log_internal(GGML_LOG_LEVEL_ERROR, __VA_ARGS__)
+
 
 //
 // helpers
@@ -780,6 +787,7 @@ struct llama_mmap {
         }
 
         if (prefetch) {
+#if WINVER >= 0x0602 // Windows 8 updated headers only
             // PrefetchVirtualMemory is only present on Windows 8 and above, so we dynamically load it
             BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
             HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -797,6 +805,9 @@ struct llama_mmap {
                             llama_format_win_err(GetLastError()).c_str());
                 }
             }
+#else
+            throw std::runtime_error("PrefetchVirtualMemory unavailable");
+#endif
         }
     }
 

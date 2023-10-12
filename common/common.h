@@ -12,9 +12,14 @@
 #include <string>
 #include <vector>
 #include <random>
-#include <thread>
 #include <unordered_map>
 #include <tuple>
+
+#if defined(__MINGW32__) && defined(_USE_MINGW_COMPAT)
+#include <mingw.thread.h>
+#else
+#include <thread>
+#endif
 
 #ifdef _WIN32
 #define DIRECTORY_SEPARATOR '\\'

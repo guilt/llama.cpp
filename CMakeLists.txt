@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.13)  # for add_link_options
+
 project("llama.cpp" C CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -80,7 +81,7 @@ option(LLAMA_ACCELERATE                      "llama: enable Accelerate framework
 option(LLAMA_BLAS                            "llama: use BLAS"                                  OFF)
 set(LLAMA_BLAS_VENDOR "Generic" CACHE STRING "llama: BLAS library vendor")
 option(LLAMA_CUBLAS                          "llama: use CUDA"                                  OFF)
-#option(LLAMA_CUDA_CUBLAS                     "llama: use cuBLAS for prompt processing"          OFF)
+#option(LLAMA_CUDA_CUBLAS                    "llama: use cuBLAS for prompt processing"          OFF)
 option(LLAMA_CUDA_FORCE_DMMV                 "llama: use dmmv instead of mmvq CUDA kernels"     OFF)
 set(LLAMA_CUDA_DMMV_X      "32" CACHE STRING "llama: x stride for dmmv CUDA kernels")
 set(LLAMA_CUDA_MMV_Y        "1" CACHE STRING "llama: y block size for mmv CUDA kernels")
@@ -89,6 +90,7 @@ set(LLAMA_CUDA_KQUANTS_ITER "2" CACHE STRING "llama: iters./thread per block for
 set(LLAMA_CUDA_PEER_MAX_BATCH_SIZE "128" CACHE STRING
                                              "llama: max. batch size for using peer access")
 option(LLAMA_HIPBLAS                         "llama: use hipBLAS"                               OFF)
+option(LLAMA_MINGW_COMPAT                    "llama: use MinGW compatibility headers"           OFF)
 option(LLAMA_CLBLAST                         "llama: use CLBlast"                               OFF)
 option(LLAMA_METAL                           "llama: use Metal"                                 ${LLAMA_METAL_DEFAULT})
 option(LLAMA_METAL_NDEBUG                    "llama: disable Metal debugging"                   OFF)
@@ -96,9 +98,9 @@ option(LLAMA_MPI                             "llama: use MPI"                   
 option(LLAMA_K_QUANTS                        "llama: use k-quants"                              ON)
 option(LLAMA_QKK_64                          "llama: use super-block size of 64 for k-quants"   OFF)
 
-option(LLAMA_BUILD_TESTS                "llama: build tests"    ${LLAMA_STANDALONE})
-option(LLAMA_BUILD_EXAMPLES             "llama: build examples" ${LLAMA_STANDALONE})
-option(LLAMA_BUILD_SERVER               "llama: build server example"                           ON)
+option(LLAMA_BUILD_TESTS                     "llama: build tests"                               ${LLAMA_STANDALONE})
+option(LLAMA_BUILD_EXAMPLES                  "llama: build examples"                            ${LLAMA_STANDALONE})
+option(LLAMA_BUILD_SERVER                    "llama: build server example"                      ON)
 
 #
 # Build info header
@@ -646,6 +648,9 @@ endif()
 if (CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
     add_compile_definitions(_BSD_SOURCE)
 endif()
+if ((MINGW) AND (LLAMA_MINGW_COMPAT))
+    add_compile_definitions(_USE_MINGW_COMPAT)
+endif()
 
 #
 # libraries
@@ -695,6 +700,10 @@ add_library(llama
             )
 
 target_include_directories(llama PUBLIC .)
+if (MINGW AND LLAMA_MINGW_COMPAT)
+    include_directories(PRIVATE ${CMAKE_SOURCE_DIR}/compat/mingw)
+endif()
+
 target_compile_features(llama PUBLIC cxx_std_11) # don't bump
 target_link_libraries(llama PRIVATE
     ggml
@@ -750,10 +759,10 @@ set(GGML_PUBLIC_HEADERS "ggml.h"
         "${GGML_HEADERS_METAL}" "${GGML_HEADERS_MPI}" "${GGML_HEADERS_EXTRA}")
 
 set_target_properties(ggml PROPERTIES PUBLIC_HEADER "${GGML_PUBLIC_HEADERS}")
-install(TARGETS ggml PUBLIC_HEADER)
+install(TARGETS ggml PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 set_target_properties(llama PROPERTIES PUBLIC_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/llama.h)
-install(TARGETS llama LIBRARY PUBLIC_HEADER)
+install(TARGETS llama PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 install(
     FILES convert.py

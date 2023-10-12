@@ -7,9 +7,15 @@
 #include <cstring>
 #include <ctime>
 #include <sstream>
-#include <thread>
-#include <mutex>
 #include <vector>
+
+#if defined(__MINGW32__) && defined(_USE_MINGW_COMPAT)
+#include <mingw.mutex.h>
+#include <mingw.thread.h>
+#else
+#include <mutex>
+#include <thread>
+#endif
 
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data

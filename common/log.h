@@ -4,10 +4,15 @@
 #include <cstring>
 #include <sstream>
 #include <iostream>
-#include <thread>
 #include <vector>
 #include <algorithm>
 #include <cinttypes>
+
+#if defined(__MINGW32__) && defined(_USE_MINGW_COMPAT)
+#include <mingw.thread.h>
+#else
+#include <thread>
+#endif
 
 // --------------------------------
 //
