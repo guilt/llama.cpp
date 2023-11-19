@@ -1,6 +1,6 @@
 set(TARGET benchmark)
 add_executable(${TARGET} benchmark-matmult.cpp)
-install(TARGETS ${TARGET} RUNTIME)
+install(TARGETS ${TARGET} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 target_link_libraries(${TARGET} PRIVATE llama build_info ${CMAKE_THREAD_LIBS_INIT})
 target_include_directories(${TARGET} PRIVATE ../../common)
 target_compile_features(${TARGET} PRIVATE cxx_std_11)
