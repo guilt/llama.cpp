@@ -904,6 +904,7 @@ struct llama_mmap {
         }
 
         if (prefetch) {
+#if WINVER >= 0x0602 // Windows 8 or higher define this function.
             // PrefetchVirtualMemory is only present on Windows 8 and above, so we dynamically load it
             BOOL (WINAPI *pPrefetchVirtualMemory) (HANDLE, ULONG_PTR, PWIN32_MEMORY_RANGE_ENTRY, ULONG);
             HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
@@ -921,6 +922,9 @@ struct llama_mmap {
                             llama_format_win_err(GetLastError()).c_str());
                 }
             }
+#else
+                throw std::runtime_error("PrefetchVirtualMemory unavailable");
+#endif
         }
     }
 

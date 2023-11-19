@@ -190,8 +190,15 @@ void ggml_print_backtrace(void) {
 #endif
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
+
 #define GGML_ALIGNED_MALLOC(size) _aligned_malloc(size, GGML_MEM_ALIGN)
 #define GGML_ALIGNED_FREE(ptr)    _aligned_free(ptr)
+
+#if defined(__MINGW32__) && !defined(_aligned_malloc)
+  _CRTIMP void __cdecl _aligned_free(void *_Memory);
+  _CRTIMP void *__cdecl _aligned_malloc(size_t _Size,size_t _Alignment);
+#endif
+
 #else
 inline static void * ggml_aligned_malloc(size_t size) {
     if (size == 0) {
