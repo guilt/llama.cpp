@@ -923,7 +923,7 @@ struct llama_mmap {
                 }
             }
 #else
-                throw std::runtime_error("PrefetchVirtualMemory unavailable");
+            throw std::runtime_error("PrefetchVirtualMemory unavailable");
 #endif
         }
     }
