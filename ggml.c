@@ -195,8 +195,8 @@ void ggml_print_backtrace(void) {
 #define GGML_ALIGNED_FREE(ptr)    _aligned_free(ptr)
 
 #if defined(__MINGW32__) && !defined(_aligned_malloc)
-  _CRTIMP void __cdecl _aligned_free(void *_Memory);
-  _CRTIMP void *__cdecl _aligned_malloc(size_t _Size,size_t _Alignment);
+_CRTIMP void   __cdecl _aligned_free  (void * _Memory);
+_CRTIMP void * __cdecl _aligned_malloc(size_t _Size, size_t _Alignment);
 #endif
 
 #else
