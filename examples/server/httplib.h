@@ -2693,8 +2693,13 @@ inline bool mmap::open(const char *path) {
     wpath += path[i];
   }
 
+  #if (_WIN32_WINNT >= 0x601)
   hFile_ = ::CreateFile2(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                          OPEN_EXISTING, NULL);
+  #else
+  hFile_ = ::CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                         NULL, OPEN_EXISTING, 0, NULL);
+  #endif
 
   if (hFile_ == INVALID_HANDLE_VALUE) { return false; }
 
