@@ -69,6 +69,10 @@
 #include "ggml-cann.h"
 #endif
 
+#ifdef GGML_USE_NEURON
+#include "ggml-neuron.h"
+#endif
+
 // disable C++17 deprecation warning for std::codecvt_utf8
 #if defined(__clang__)
 #    pragma clang diagnostic push
@@ -192,6 +196,9 @@ struct ggml_backend_registry {
 #endif
 #ifdef GGML_USE_CANN
         register_backend(ggml_backend_cann_reg());
+#endif
+#ifdef GGML_USE_NEURON
+        register_backend(ggml_backend_neuron_reg());
 #endif
 #ifdef GGML_USE_BLAS
         register_backend(ggml_backend_blas_reg());
