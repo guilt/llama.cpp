@@ -83,3 +83,12 @@ UNARY_EXT(floor,        floor(x),                                          floor
 UNARY_EXT(ceil,         ceil(x),                                           ceil(x))
 UNARY_EXT(round,        round(x),                                          round(x))
 UNARY_EXT(trunc,        trunc(x),                                          trunc(x))
+UNARY_EXT(cos,          cos(x),                                            cos(x))
+UNARY_EXT(sin,          sin(x),                                            sin(x))
+UNARY_EXT(log,          log(x),                                            log(x))
+UNARY_EXT(relu,         fmax(0.0f, x),                                     fmax((float4)0.0f, x))
+UNARY_EXT(gelu,         0.5f*x*(1.0f + tanh(0.7978845608028654f*x*(1.0f + 0.044715f*x*x))), \
+                        0.5f*x*(1.0f + tanh((float4)0.7978845608028654f*x*(1.0f + (float4)0.044715f*x*x))))
+UNARY_EXT(gelu_erf,     0.5f*x*(1.0f + erf(x*0.7071067811865476f)),         0.5f*x*(1.0f + erf(x*(float4)0.7071067811865476f)))
+UNARY_EXT(gelu_quick,   x/(1.0f + exp(-1.702f*x)),                          x/(1.0f + exp((float4)(-1.702f)*x)))
+UNARY_EXT(silu,         x/(1.0f + exp(-x)),                                x/(1.0f + exp(-x)))

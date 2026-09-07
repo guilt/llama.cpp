@@ -970,6 +970,14 @@ struct ggml_backend_opencl_context {
     cl_kernel kernel_ceil_f32, kernel_ceil_f32_4, kernel_ceil_f32_nc, kernel_ceil_f16, kernel_ceil_f16_4, kernel_ceil_f16_nc;
     cl_kernel kernel_round_f32, kernel_round_f32_4, kernel_round_f32_nc, kernel_round_f16, kernel_round_f16_4, kernel_round_f16_nc;
     cl_kernel kernel_trunc_f32, kernel_trunc_f32_4, kernel_trunc_f32_nc, kernel_trunc_f16, kernel_trunc_f16_4, kernel_trunc_f16_nc;
+    cl_kernel kernel_cos_f32, kernel_cos_f32_4, kernel_cos_f32_nc, kernel_cos_f16, kernel_cos_f16_4, kernel_cos_f16_nc;
+    cl_kernel kernel_sin_f32, kernel_sin_f32_4, kernel_sin_f32_nc, kernel_sin_f16, kernel_sin_f16_4, kernel_sin_f16_nc;
+    cl_kernel kernel_log_f32, kernel_log_f32_4, kernel_log_f32_nc, kernel_log_f16, kernel_log_f16_4, kernel_log_f16_nc;
+    cl_kernel kernel_relu_f32, kernel_relu_f32_4, kernel_relu_f32_nc, kernel_relu_f16, kernel_relu_f16_4, kernel_relu_f16_nc;
+    cl_kernel kernel_gelu_f32, kernel_gelu_f32_4, kernel_gelu_f32_nc, kernel_gelu_f16, kernel_gelu_f16_4, kernel_gelu_f16_nc;
+    cl_kernel kernel_gelu_erf_f32, kernel_gelu_erf_f32_4, kernel_gelu_erf_f32_nc, kernel_gelu_erf_f16, kernel_gelu_erf_f16_4, kernel_gelu_erf_f16_nc;
+    cl_kernel kernel_gelu_quick_f32, kernel_gelu_quick_f32_4, kernel_gelu_quick_f32_nc, kernel_gelu_quick_f16, kernel_gelu_quick_f16_4, kernel_gelu_quick_f16_nc;
+    cl_kernel kernel_silu_f32, kernel_silu_f32_4, kernel_silu_f32_nc, kernel_silu_f16, kernel_silu_f16_4, kernel_silu_f16_nc;
     cl_kernel kernel_softplus_f32, kernel_softplus_f32_4, kernel_softplus_f32_nc;
     cl_kernel kernel_softplus_f16, kernel_softplus_f16_4, kernel_softplus_f16_nc;
     cl_kernel kernel_upscale;
@@ -3272,6 +3280,14 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
         CL_UNARY_EXT_K(ceil)
         CL_UNARY_EXT_K(round)
         CL_UNARY_EXT_K(trunc)
+        CL_UNARY_EXT_K(cos)
+        CL_UNARY_EXT_K(sin)
+        CL_UNARY_EXT_K(log)
+        CL_UNARY_EXT_K(relu)
+        CL_UNARY_EXT_K(gelu)
+        CL_UNARY_EXT_K(gelu_erf)
+        CL_UNARY_EXT_K(gelu_quick)
+        CL_UNARY_EXT_K(silu)
 #undef CL_UNARY_EXT_K
         CL_CHECK(clReleaseProgram(prog));
         GGML_LOG_CONT(".");
@@ -8681,6 +8697,10 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         case GGML_OP_SQRT:
             return (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16) &&
                     ggml_is_contiguous(op->src[0]);
+        case GGML_OP_COS:
+        case GGML_OP_SIN:
+        case GGML_OP_LOG:
+            return op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16;
         case GGML_OP_UNARY:
             switch (ggml_get_unary_op(op)) {
                 case GGML_UNARY_OP_GELU:
@@ -8688,7 +8708,8 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                 case GGML_UNARY_OP_RELU:
                 case GGML_UNARY_OP_GELU_ERF:
                 case GGML_UNARY_OP_GELU_QUICK:
-                    return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32;
+                    return op->src[0]->type == GGML_TYPE_F16 ||
+                           (op->src[0]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]));
                 case GGML_UNARY_OP_SIGMOID:
                     return ggml_is_contiguous(op->src[0]);
                 case GGML_UNARY_OP_TANH:
@@ -8798,12 +8819,12 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
             } else if (op->src[0]->type == GGML_TYPE_BF16) {
                 return true;
             } else if (op->src[0]->type == GGML_TYPE_F32) {
-                return op->src[1]->type == GGML_TYPE_F32;
+                return op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16;
             } else if (op->src[0]->type == GGML_TYPE_Q1_0) {
-                return op->src[1]->type == GGML_TYPE_F32;
+                return op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16;
             } else if (op->src[0]->type == GGML_TYPE_Q4_0) {
                 // Non-contig src0 routes through on-device dequant-to-f16.
-                return op->src[1]->type == GGML_TYPE_F32;
+                return op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16;
             } else if (op->src[0]->type == GGML_TYPE_Q4_1 ||
                        op->src[0]->type == GGML_TYPE_Q5_0  || op->src[0]->type == GGML_TYPE_Q5_1 ||
                        op->src[0]->type == GGML_TYPE_MXFP4 ||
@@ -8840,14 +8861,14 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                         return false;
                     }
                 }
-                return op->src[1]->type == GGML_TYPE_F32 && ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
+                return (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) && ggml_is_contiguous(op->src[0]) && ggml_is_contiguous(op->src[1]);
             } else if (op->src[0]->type == GGML_TYPE_Q8_0) {
                 // ggml_cl_mul_mat_q8_0_f32_adreno now honors src1/dst view_offs (the
                 // activation sub-buffer starts at offset1 and the kernels take offsetd),
                 // so a broadcast q8_0 matmul (src1 batch > src0 batch, e.g. Qwen3.5-9B-UD
                 // / Qwen3.6-35B q8_0 GDN ssm_out) runs on GPU via the per-slice broadcast
                 // iteration in ggml_cl_mul_mat. No special-casing needed.
-                return op->src[1]->type == GGML_TYPE_F32;
+                return op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16;
             }
             return false;
         case GGML_OP_MUL_MAT_ID:
@@ -15632,6 +15653,14 @@ GGML_CL_UNARY_EXT_WRAP(ggml_cl_floor,       floor)
 GGML_CL_UNARY_EXT_WRAP(ggml_cl_ceil,        ceil)
 GGML_CL_UNARY_EXT_WRAP(ggml_cl_round,       round)
 GGML_CL_UNARY_EXT_WRAP(ggml_cl_trunc,       trunc)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_cos,         cos)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_sin,         sin)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_log,         log)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_relu_ext,    relu)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_gelu_ext,    gelu)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_gelu_erf_ext, gelu_erf)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_gelu_quick_ext, gelu_quick)
+GGML_CL_UNARY_EXT_WRAP(ggml_cl_silu_ext,    silu)
 
 #undef GGML_CL_UNARY_EXT_WRAP
 
@@ -22010,6 +22039,70 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
 
     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
 
+    // The matmul kernels consume the activations as a CL_FLOAT image. When the
+    // activations are f16, convert them to a scratch f32 buffer and recurse with
+    // a f32 stand-in for src1. Handles all weight types uniformly.
+    if (src1t == GGML_TYPE_F16) {
+        const ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *) src1->extra;
+        const cl_ulong offset1 = extra1->offset + src1->view_offs;
+        const int ne00 = src1->ne[0], ne01 = src1->ne[1], ne02 = src1->ne[2], ne03 = src1->ne[3];
+        const cl_ulong nb0 = sizeof(float);
+        const cl_ulong nb1 = nb0 * ne00;
+        const cl_ulong nb2 = nb1 * ne01;
+        const cl_ulong nb3 = nb2 * ne02;
+
+        cl_int err;
+        cl_mem f32_buf = clCreateBuffer(backend_ctx->context, CL_MEM_READ_WRITE,
+            (size_t) ne00 * ne01 * ne02 * ne03 * sizeof(float), NULL, &err);
+        CL_CHECK(err);
+
+        cl_kernel k = backend_ctx->kernel_cpy_f16_f32;
+        cl_ulong zero = 0;
+        CL_CHECK(clSetKernelArg(k, 0, sizeof(cl_mem),   &extra1->data_device));
+        CL_CHECK(clSetKernelArg(k, 1, sizeof(cl_ulong), &offset1));
+        CL_CHECK(clSetKernelArg(k, 2, sizeof(cl_mem),   &f32_buf));
+        CL_CHECK(clSetKernelArg(k, 3, sizeof(cl_ulong), &zero));
+        CL_CHECK(clSetKernelArg(k, 4, sizeof(int),      &ne00));
+        CL_CHECK(clSetKernelArg(k, 5, sizeof(int),      &ne01));
+        CL_CHECK(clSetKernelArg(k, 6, sizeof(int),      &ne02));
+        CL_CHECK(clSetKernelArg(k, 7, sizeof(int),      &ne03));
+        CL_CHECK(clSetKernelArg(k, 8,  sizeof(cl_ulong), &src1->nb[0]));
+        CL_CHECK(clSetKernelArg(k, 9,  sizeof(cl_ulong), &src1->nb[1]));
+        CL_CHECK(clSetKernelArg(k, 10, sizeof(cl_ulong), &src1->nb[2]));
+        CL_CHECK(clSetKernelArg(k, 11, sizeof(cl_ulong), &src1->nb[3]));
+        CL_CHECK(clSetKernelArg(k, 12, sizeof(int),      &ne00));
+        CL_CHECK(clSetKernelArg(k, 13, sizeof(int),      &ne01));
+        CL_CHECK(clSetKernelArg(k, 14, sizeof(int),      &ne02));
+        CL_CHECK(clSetKernelArg(k, 15, sizeof(int),      &ne03));
+        CL_CHECK(clSetKernelArg(k, 16, sizeof(cl_ulong), &nb0));
+        CL_CHECK(clSetKernelArg(k, 17, sizeof(cl_ulong), &nb1));
+        CL_CHECK(clSetKernelArg(k, 18, sizeof(cl_ulong), &nb2));
+        CL_CHECK(clSetKernelArg(k, 19, sizeof(cl_ulong), &nb3));
+
+        const int nth = MIN(64, ne00);
+        size_t gws[] = { (size_t) ne01*nth, (size_t) ne02, (size_t) ne03 };
+        size_t lws[] = { (size_t) nth, 1, 1 };
+        backend_ctx->enqueue_ndrange_kernel(k, 3, gws, lws, src1);
+
+        ggml_tensor         fake_src1 = *src1;
+        ggml_tensor_extra_cl fake_extra = {};
+        fake_extra.data_device = f32_buf;
+        fake_extra.offset      = 0;
+        fake_src1.type         = GGML_TYPE_F32;
+        fake_src1.extra        = &fake_extra;
+        fake_src1.view_src     = nullptr;
+        fake_src1.view_offs    = 0;
+        fake_src1.nb[0] = nb0;
+        fake_src1.nb[1] = nb1;
+        fake_src1.nb[2] = nb2;
+        fake_src1.nb[3] = nb3;
+
+        ggml_cl_mul_mat(backend, src0, &fake_src1, dst);
+        CL_CHECK(clFinish(backend_ctx->queue));
+        CL_CHECK(clReleaseMemObject(f32_buf));
+        return;
+    }
+
     // quant kv without FA
     // used for non-contiguous src0 (the usual head-major permuted K view when n_head_kv>1)
     // AND for the contiguous case that occurs when n_head_kv==1 (e.g. Gemma-4 E2B)
@@ -28295,6 +28388,24 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
             }
             func = ggml_cl_sqrt;
             break;
+        case GGML_OP_COS:
+            if (!any_on_device) {
+                return false;
+            }
+            func = ggml_cl_cos;
+            break;
+        case GGML_OP_SIN:
+            if (!any_on_device) {
+                return false;
+            }
+            func = ggml_cl_sin;
+            break;
+        case GGML_OP_LOG:
+            if (!any_on_device) {
+                return false;
+            }
+            func = ggml_cl_log;
+            break;
         case GGML_OP_MEAN:
             if (!any_on_device) {
                 return false;
@@ -28307,31 +28418,31 @@ bool ggml_cl_compute_forward(ggml_backend_t backend, struct ggml_tensor * tensor
                     if (!any_on_device) {
                         return false;
                     }
-                    func = ggml_cl_gelu;
+                    func = tensor->src[0]->type == GGML_TYPE_F16 ? ggml_cl_gelu_ext : ggml_cl_gelu;
                     break;
                 case GGML_UNARY_OP_GELU_ERF:
                     if (!any_on_device) {
                         return false;
                     }
-                    func = ggml_cl_gelu_erf;
+                    func = tensor->src[0]->type == GGML_TYPE_F16 ? ggml_cl_gelu_erf_ext : ggml_cl_gelu_erf;
                     break;
                 case GGML_UNARY_OP_GELU_QUICK:
                     if (!any_on_device) {
                         return false;
                     }
-                    func = ggml_cl_gelu_quick;
+                    func = tensor->src[0]->type == GGML_TYPE_F16 ? ggml_cl_gelu_quick_ext : ggml_cl_gelu_quick;
                     break;
                 case GGML_UNARY_OP_SILU:
                     if (!any_on_device) {
                         return false;
                     }
-                    func = ggml_cl_silu;
+                    func = tensor->src[0]->type == GGML_TYPE_F16 ? ggml_cl_silu_ext : ggml_cl_silu;
                     break;
                 case GGML_UNARY_OP_RELU:
                     if (!any_on_device) {
                         return false;
                     }
-                    func = ggml_cl_relu;
+                    func = tensor->src[0]->type == GGML_TYPE_F16 ? ggml_cl_relu_ext : ggml_cl_relu;
                     break;
                 case GGML_UNARY_OP_SIGMOID:
                     if (!any_on_device) {
