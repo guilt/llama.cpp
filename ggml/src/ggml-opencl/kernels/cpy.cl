@@ -311,3 +311,89 @@ kernel void kernel_cpy_f32_f32_flat(
         }
     }
 }
+
+//------------------------------------------------------------------------------
+// bf16 (top 16 bits of f32, round-to-nearest-even like ggml_compute_fp32_to_bf16)
+//------------------------------------------------------------------------------
+#define CPY_BF16(NAME, SRCTYPE, CONV)                                          \
+kernel void kernel_cpy_##NAME##_bf16(                                          \
+        global SRCTYPE * src0, ulong offset0,                                 \
+        global ushort * dst, ulong offsetd,                                   \
+        int ne00, int ne01, int ne02, int ne03,                                \
+        ulong nb00, ulong nb01, ulong nb02, ulong nb03,                        \
+        int ne0, int ne1, int ne2, int ne3,                                    \
+        ulong nb0, ulong nb1, ulong nb2, ulong nb3) {                         \
+    src0 = (global SRCTYPE*)((global char*)src0 + offset0);                    \
+    dst  = (global ushort*)((global char*)dst + offsetd);                      \
+    int i03 = get_group_id(2);                                                 \
+    int i02 = get_group_id(1);                                                 \
+    int i01 = get_group_id(0);                                                 \
+    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;                     \
+    int i3 = n / (ne2*ne1*ne0);                                                \
+    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);                                 \
+    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;                          \
+    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);                       \
+    global ushort * dst_data = (global ushort *)((global char *) dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0); \
+    for (int i00 = get_local_id(0); i00 < ne00; i00 += get_local_size(0)) {    \
+        global const SRCTYPE * src = (global const SRCTYPE *)((global char *) src0 + \
+            i03*nb03 + i02*nb02 + i01*nb01 + i00*nb00);                        \
+        const float f = (CONV src[0]);                                         \
+        const uint bits = as_uint(f);                                          \
+        if ((bits & 0x7fffffffu) > 0x7f800000u) {                              \
+            dst_data[i00] = (ushort)((bits >> 16) | 64u);                      \
+        } else {                                                               \
+            dst_data[i00] = (ushort)((bits + (0x7fffu + ((bits >> 16) & 1u))) >> 16); \
+        }                                                                      \
+    }                                                                          \
+}
+
+CPY_BF16(f32, float, )
+CPY_BF16(f16, half, (float))
+
+//------------------------------------------------------------------------------
+// Quantize-on-copy (KV cache store): f32/f16 -> q8_0. Writes d and qs at their
+// explicit byte offsets (no OpenCL struct, which may pad past ggml's 34 bytes).
+// Matches quantize_row_q8_0_ref (amax/127, round).
+//------------------------------------------------------------------------------
+#define CPY_Q8_0(NAME, SRCTYPE, CONV)                                          \
+kernel void kernel_cpy_##NAME##_q8_0(                                          \
+        global SRCTYPE * src0, ulong offset0,                                 \
+        global char * dst, ulong offsetd,                                     \
+        int ne00, int ne01, int ne02, int ne03,                                \
+        ulong nb00, ulong nb01, ulong nb02, ulong nb03,                        \
+        int ne0, int ne1, int ne2, int ne3,                                    \
+        ulong nb0, ulong nb1, ulong nb2, ulong nb3) {                         \
+    src0 = (global SRCTYPE*)((global char*)src0 + offset0);                    \
+    dst  = dst + offsetd;                                                      \
+    int i03 = get_group_id(2);                                                 \
+    int i02 = get_group_id(1);                                                 \
+    int i01 = get_group_id(0);                                                 \
+    int n = i03*ne02*ne01*ne00 + i02*ne01*ne00 + i01*ne00;                     \
+    int i3 = n / (ne2*ne1*ne0);                                                \
+    int i2 = (n - i3*ne2*ne1*ne0) / (ne1*ne0);                                 \
+    int i1 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0) / ne0;                          \
+    int i0 = (n - i3*ne2*ne1*ne0 - i2*ne1*ne0 - i1*ne0);                       \
+    global char * dst_row = dst + i3*nb3 + i2*nb2 + i1*nb1 + i0*nb0;           \
+    const int nb = ne00 / 32;                                                  \
+    for (int b = get_local_id(0); b < nb; b += get_local_size(0)) {            \
+        global const SRCTYPE * src = (global const SRCTYPE *)((global char *) src0 + \
+            i03*nb03 + i02*nb02 + i01*nb01 + (b*32)*nb00);                     \
+        float amax = 0.0f;                                                     \
+        for (int j = 0; j < 32; j++) {                                         \
+            amax = fmax(amax, fabs((float)(CONV src[j*((int)(nb00/sizeof(SRCTYPE)))]))); \
+        }                                                                      \
+        const float d = amax / 127.0f;                                         \
+        float id = 0.0f;                                                       \
+        if (d != 0.0f) {                                                       \
+            id = 1.0f/d;                                                       \
+        }                                                                      \
+        *(global half *)(dst_row + b*nb0) = (half)d;                           \
+        global char * qs = dst_row + b*nb0 + 2;                                \
+        for (int j = 0; j < 32; j++) {                                         \
+            qs[j] = (char)round((float)(CONV src[j*((int)(nb00/sizeof(SRCTYPE)))]) * id); \
+        }                                                                      \
+    }                                                                          \
+}
+
+CPY_Q8_0(f32, float, )
+CPY_Q8_0(f16, half, (float))
