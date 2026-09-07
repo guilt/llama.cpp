@@ -159,6 +159,27 @@ struct common_sampler {
         }
 
         cur_p = { cur.data(), cur.size(), -1, false };
+
+        if (getenv("LLAMA_DEBUG_LOGITS")) {
+            static int dbg_tok = 0;
+            if (dbg_tok < 32) {
+                int n = (int) cur.size();
+                int top[5] = {-1,-1,-1,-1,-1};
+                float tv[5] = {-1e30f,-1e30f,-1e30f,-1e30f,-1e30f};
+                for (int i = 0; i < n; i++) {
+                    float l = cur[i].logit;
+                    for (int k = 0; k < 5; k++) {
+                        if (l > tv[k]) {
+                            for (int m = 4; m > k; m--) { tv[m]=tv[m-1]; top[m]=top[m-1]; }
+                            tv[k]=l; top[k]=i; break;
+                        }
+                    }
+                }
+                fprintf(stderr, "DBG LOGITS pos=%d top5:", dbg_tok++);
+                for (int k = 0; k < 5; k++) fprintf(stderr, " [%d %.2f]", top[k], tv[k]);
+                fprintf(stderr, "\n");
+            }
+        }
     }
 
     common_time_meas tm() {

@@ -232,6 +232,10 @@ llama_context::llama_context(
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
     cparams.auto_fgdn    = false;
+    if (getenv("LLAMA_NO_FUSED_GDN")) {
+        cparams.fused_gdn_ar = false;
+        cparams.fused_gdn_ch = false;
+    }
 
     cparams.fused_lid = true;
     cparams.auto_flid = false;
@@ -2513,6 +2517,31 @@ ggml_status llama_context::graph_compute(
     auto status = ggml_backend_sched_graph_compute_async(sched.get(), gf);
     if (status != GGML_STATUS_SUCCESS) {
         LLAMA_LOG_ERROR("%s: ggml_backend_sched_graph_compute_async failed with error %d\n", __func__, status);
+    }
+
+    const char * dump_env = getenv("LLAMA_DUMP_TENSOR");
+    if (dump_env && dump_env[0]) {
+        static int dump_count = 0;
+        if (dump_count < 12) {
+            ggml_tensor * dt = ggml_graph_get_tensor(gf, dump_env);
+            if (!dt) {
+                int nn = ggml_graph_n_nodes(gf);
+                for (int i = 0; i < nn && !dt; i++) {
+                    ggml_tensor * gt = ggml_graph_node(gf, i);
+                    if (gt->name[0] && strstr(gt->name, dump_env)) dt = gt;
+                }
+            }
+            if (dt && dt->buffer) {
+                dump_count++;
+                std::vector<float> dbuf(ggml_nelements(dt));
+                ggml_backend_tensor_get(dt, dbuf.data(), 0, ggml_nbytes(dt));
+                fprintf(stderr, "DUMP %s ne=[%lld,%lld,%lld,%lld]:", dt->name,
+                        (long long)dt->ne[0],(long long)dt->ne[1],(long long)dt->ne[2],(long long)dt->ne[3]);
+                int npr = (int) std::min<size_t>(8, dbuf.size());
+                for (int i = 0; i < npr; i++) fprintf(stderr, " %.5f", dbuf[i]);
+                fprintf(stderr, "\n");
+            }
+        }
     }
 
     // fprintf(stderr, "splits: %d\n", ggml_backend_sched_get_n_splits(sched));

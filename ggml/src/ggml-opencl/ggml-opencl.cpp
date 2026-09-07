@@ -14348,6 +14348,27 @@ static void ggml_cl_ssm_conv(ggml_backend_t backend, const ggml_tensor * src0, c
     }
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size_ptr, dst);
+
+    static int dbg_cv = 0;
+    if (getenv("GGML_OPENCL_CONV_VERIFY") && dbg_cv < 8 && (src0->ne[0] == 7 || src0->ne[0] == 4)) {
+        dbg_cv++;
+        clFinish(backend_ctx->queue);
+        float sv[8], cv[4], dv;
+        cl_mem sb = ((const ggml_tensor_extra_cl *) src0->extra)->data_device;
+        cl_ulong so = ((const ggml_tensor_extra_cl *) src0->extra)->offset + src0->view_offs;
+        cl_mem kb = ((const ggml_tensor_extra_cl *) src1->extra)->data_device;
+        cl_ulong ko = ((const ggml_tensor_extra_cl *) src1->extra)->offset + src1->view_offs;
+        cl_mem db = ((const ggml_tensor_extra_cl *) dst->extra)->data_device;
+        cl_ulong dof = ((const ggml_tensor_extra_cl *) dst->extra)->offset + dst->view_offs;
+        if (clEnqueueReadBuffer(backend_ctx->queue, sb, CL_TRUE, so, 32, sv, 0, NULL, NULL) == CL_SUCCESS &&
+            clEnqueueReadBuffer(backend_ctx->queue, kb, CL_TRUE, ko, 16, cv, 0, NULL, NULL) == CL_SUCCESS &&
+            clEnqueueReadBuffer(backend_ctx->queue, db, CL_TRUE, dof, 4, &dv, 0, NULL, NULL) == CL_SUCCESS) {
+            float man = sv[0]*cv[0] + sv[1]*cv[1] + sv[2]*cv[2] + sv[3]*cv[3];
+            fprintf(stderr, "  DBG CONVV: ncs=%lld nb01=%lu nb00=%lu s[0..3]=%.5f %.5f %.5f %.5f manual=%.5f kernel_out=%.5f\n",
+                (long long) src0->ne[0], (unsigned long) nb01, (unsigned long) nb00,
+                sv[0], sv[1], sv[2], sv[3], man, dv);
+        }
+    }
 }
 
 static void ggml_cl_gelu(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
@@ -27740,6 +27761,19 @@ static void ggml_cl_rope(ggml_backend_t backend, const ggml_tensor * src0, const
     size_t local_work_size[] = {(size_t)nth, 1, 1};
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    static int dbg_rope = 0;
+    if (getenv("GGML_OPENCL_ROPE_VERIFY") && dbg_rope < 40 && is_mrope) {
+        dbg_rope++;
+        clFinish(backend_ctx->queue);
+        float in0[8], out0[8];
+        clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, 32, in0, 0, NULL, NULL);
+        clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, 32, out0, 0, NULL, NULL);
+        fprintf(stderr, "  DBG ROPEV: mrope ne0=%lld ne1=%lld ne2=%lld n_dims=%d sections=[%d,%d,%d,%d] in[0..3]=%.5f %.5f %.5f %.5f out[0..3]=%.5f %.5f %.5f %.5f\n",
+            (long long) src0->ne[0], (long long) src0->ne[1], (long long) src0->ne[2], n_dims,
+            sections[0], sections[1], sections[2], sections[3],
+            in0[0], in0[1], in0[2], in0[3], out0[0], out0[1], out0[2], out0[3]);
+    }
 }
 
 static void ggml_cl_solve_tri(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
@@ -28273,6 +28307,13 @@ static void ggml_cl_gated_delta_net(ggml_backend_t backend, ggml_tensor * dst) {
 
     const int kda = (src_g->ne[0] == (int64_t) S_v) ? 1 : 0;
 
+    static int dbg_gdn = 0;
+    if (dbg_gdn < 40) {
+        dbg_gdn++;
+        fprintf(stderr, "DBG GDN: S_v=%u H_v=%u n_tokens=%u n_seqs=%u K=%u kda=%d g_ne0=%lld\n",
+            S_v, H_v, n_tokens, n_seqs, K, kda, (long long)src_g->ne[0]);
+    }
+
     // TODO: Optimize when S_v!=128. Not necessary for now as Qwen3.5/6 are all S_v=128
     // token generation mode (tgpp=0):
     // process 1 token at a time, so columns per lane (cpl) == 1
@@ -28412,6 +28453,41 @@ static void ggml_cl_gated_delta_net(ggml_backend_t backend, ggml_tensor * dst) {
     local_work_size[2]  = 1;
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    if (getenv("GGML_OPENCL_GDN_VERIFY") && K == 1 && n_seqs == 1 && (n_tokens == 1 || n_tokens == 2)) {
+        static int gdnv = 0;
+        if (gdnv < 4) {
+            gdnv++;
+            clFinish(backend_ctx->queue);
+            float state_in[128], q_in[128], k_in[128], v_in, g_in, beta_in, attn_out, state_out[128];
+            clEnqueueReadBuffer(backend_ctx->queue, extra_state->data_device, CL_TRUE, off_state, S_v*4, state_in, 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_q->data_device,     CL_TRUE, off_q,     S_v*4, q_in,     0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_k->data_device,     CL_TRUE, off_k,     S_v*4, k_in,     0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_v->data_device,     CL_TRUE, off_v,     4,     &v_in,     0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_g->data_device,     CL_TRUE, off_g,     4,     &g_in,     0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_beta->data_device,  CL_TRUE, off_beta,  4,     &beta_in,  0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_dst->data_device,   CL_TRUE, off_dst,   4,     &attn_out, 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra_dst->data_device,   CL_TRUE, off_dst + s_off*4, S_v*4, state_out, 0, NULL, NULL);
+            clFinish(backend_ctx->queue);
+            float gv = expf(g_in);
+            float kv = 0.0f, attn = 0.0f;
+            float s_new[8];
+            for (int r = 0; r < 8; r++) kv += state_in[r]*k_in[r];
+            kv *= gv;
+            float delta = (v_in - kv) * beta_in;
+            for (int r = 0; r < 8; r++) {
+                s_new[r] = gv*state_in[r] + k_in[r]*delta;
+                attn += s_new[r]*q_in[r];
+            }
+            attn *= scale;
+            fprintf(stderr, "  DBG GDNV: S_v=%u kda=%d g=%.5f gv=%.5f v=%.5f beta=%.5f kv=%.5f delta=%.5f\n",
+                S_v, kda, g_in, gv, v_in, beta_in, kv, delta);
+            fprintf(stderr, "  DBG GDNV: s_in[0..3]=%.5f %.5f %.5f %.5f s_new[0..3]=%.5f %.5f %.5f %.5f\n",
+                state_in[0], state_in[1], state_in[2], state_in[3], s_new[0], s_new[1], s_new[2], s_new[3]);
+            fprintf(stderr, "  DBG GDNV: attn kernel=%.5f attn manual=%.5f | state_out[0..3]=%.5f %.5f %.5f %.5f\n",
+                attn_out, attn, state_out[0], state_out[1], state_out[2], state_out[3]);
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
