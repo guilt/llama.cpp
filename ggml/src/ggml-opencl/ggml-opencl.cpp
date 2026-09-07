@@ -9001,6 +9001,15 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                                      v->type == GGML_TYPE_Q4_0 && op->type == GGML_TYPE_F32 &&
                                      dk % 32 == 0 && dv % 32 == 0;
 
+            // Additional quantized KV types handled via the host-dequant fallback
+            // (ggml_cl_flash_attn_prepare_quantized_tensor dequants any quant type
+            // to f32, then the f32 FA kernel runs). Correct but slower than native.
+            const bool is_f32_quant = q->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                                     k->type == v->type &&
+                                     (k->type == GGML_TYPE_Q4_1 || k->type == GGML_TYPE_Q5_0 ||
+                                      k->type == GGML_TYPE_Q5_1 || k->type == GGML_TYPE_IQ4_NL) &&
+                                     dk % 32 == 0 && dv % 32 == 0;
+
             // A7X (Adreno 740, compiler E031.41) SIGSEGVs inside clBuildProgram
             // building the flash_attn programs whose KV path is mixed-type or
             // dequantized — f32_f16, q8_0, q4_0 (reproduced at DK=40 and DK=64; it
@@ -9026,7 +9035,7 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                                      is_kv_type_ok(k->type) && is_kv_type_ok(v->type);
 
             const bool kv_combo_ok = is_f32_f32 || is_f16_f16 || is_f32_f16 ||
-                                         is_f32_q8_0 || is_f32_q4_0 || is_f32_asym;
+                                         is_f32_q8_0 || is_f32_q4_0 || is_f32_asym || is_f32_quant;
             if (!kv_combo_ok) {
                 return false;
             }
