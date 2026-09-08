@@ -63,14 +63,17 @@ kernel void kernel_ssm_conv_f32_f32_4(
 
     int nc = ne10;
 
-    global float4 * s = (global float4 *) (src0 + ir*nb01 + i2*nb00 + i3*nb02);
-    global float4 * c = (global float4 *) (src1 + ir*nb11);
-    global float  * d = (global float  *) (dst  + ir*nb0  + i2*nb1  + i3*nb2);
+    global float * s = (global float *) (src0 + ir*nb01 + i2*nb00 + i3*nb02);
+    global float * c = (global float *) (src1 + ir*nb11);
+    global float * d = (global float *) (dst  + ir*nb0  + i2*nb1  + i3*nb2);
 
     float sumf = 0.0f;
 
-    for (int i0 = 0; i0 < nc/4; ++i0) {
-        sumf += dot(s[i0], c[i0]);
+    // scalar loads + mad: float4 loads here are not 16-byte aligned for every
+    // output token (offset i2*nb00), and the dot() builtin miscompiles on some
+    // Adreno compilers for certain values. Match the CPU reference exactly.
+    for (int i0 = 0; i0 < nc; ++i0) {
+        sumf = mad(s[i0], c[i0], sumf);
     }
 
     d[0] = sumf;
