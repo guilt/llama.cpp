@@ -14841,6 +14841,18 @@ static void ggml_cl_rms_norm(ggml_backend_t backend, const ggml_tensor * src0, c
     CL_CHECK(clSetKernelArg(kernel, 12, sizeof(float)*nth/sgs,  NULL));
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    static int dbg_nrm = 0;
+    if (getenv("GGML_OPENCL_NORM_VERIFY") && dbg_nrm < 20 && ne00 == 2048) {
+        dbg_nrm++;
+        clFinish(backend_ctx->queue);
+        float in0[16], out0[16];
+        clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, 64, in0, 0, NULL, NULL);
+        clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, 64, out0, 0, NULL, NULL);
+        fprintf(stderr, "  DBG NRMV: ne0=%d ne1=%d in[0..7]=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f out[0..7]=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
+            ne00, ne01, in0[0], in0[1], in0[2], in0[3], in0[4], in0[5], in0[6], in0[7],
+            out0[0], out0[1], out0[2], out0[3], out0[4], out0[5], out0[6], out0[7]);
+    }
 }
 
 static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * rms_norm_tensor, ggml_tensor * mul_tensor) {
@@ -14952,6 +14964,18 @@ static void ggml_opencl_op_rms_norm_fused(ggml_backend_t backend, ggml_tensor * 
     CL_CHECK(clSetKernelArg(kernel, 24, sizeof(float)*sgs,     NULL));
 
     backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+    static int dbg_nrm = 0;
+    if (getenv("GGML_OPENCL_NORM_VERIFY") && dbg_nrm < 20 && ne00 == 2048) {
+        dbg_nrm++;
+        clFinish(backend_ctx->queue);
+        float in0[16], out0[16];
+        clEnqueueReadBuffer(backend_ctx->queue, extra0->data_device, CL_TRUE, offset0, 64, in0, 0, NULL, NULL);
+        clEnqueueReadBuffer(backend_ctx->queue, extrad->data_device, CL_TRUE, offsetd, 64, out0, 0, NULL, NULL);
+        fprintf(stderr, "  DBG NRMV: ne0=%d ne1=%d in[0..7]=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f out[0..7]=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
+            ne00, ne01, in0[0], in0[1], in0[2], in0[3], in0[4], in0[5], in0[6], in0[7],
+            out0[0], out0[1], out0[2], out0[3], out0[4], out0[5], out0[6], out0[7]);
+    }
 }
 
 static void ggml_opencl_op_norm_fused(ggml_backend_t backend, ggml_tensor * norm_tensor, ggml_tensor * mul_tensor, ggml_tensor * add_tensor) {
@@ -18119,6 +18143,65 @@ static void ggml_cl_flash_attn(ggml_backend_t backend, const ggml_tensor * q, co
         size_t global_work_size[] = { (size_t)((n_q + block_m - 1) / block_m) * wg_size, (size_t)(n_head * n_batch) };
         backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size, local_work_size, dst);
     }
+
+    static int dbg_fav = 0;
+    if (getenv("GGML_OPENCL_FA_VERIFY") && dbg_fav < 2 && n_q == 4 && d_head_q == 256 && d_head_v == 256 && n_batch == 1) {
+        dbg_fav++;
+        clFinish(backend_ctx->queue);
+        const float scale_fa = 1.0f / sqrtf((float) d_head_q);
+        const int kv_head = 0; // head 0 maps to kv head 0 (GQA)
+        const int q_tok = 0;
+        const ggml_tensor_extra_cl * ed = (const ggml_tensor_extra_cl *) dst->extra;
+        const cl_ulong od = ed->offset + dst->view_offs;
+        const int n_kv_fa = (int) k->ne[1];
+        std::vector<ggml_fp16_t> mfull(ggml_nelements(mask));
+        std::vector<ggml_fp16_t> kfull(ggml_nelements(k)), vfull(ggml_nelements(v));
+        ggml_backend_tensor_get(mask, mfull.data(), 0, ggml_nbytes(mask));
+        ggml_backend_tensor_get(k, kfull.data(), 0, ggml_nbytes(k));
+        ggml_backend_tensor_get(v, vfull.data(), 0, ggml_nbytes(v));
+        auto fh = [](const ggml_tensor * t, const std::vector<ggml_fp16_t> & b, int i0, int i1, int i2) -> float {
+            const size_t off = (size_t)i0*t->nb[0] + (size_t)i1*t->nb[1] + (size_t)i2*t->nb[2];
+            return ggml_fp16_to_fp32(b[off / t->nb[0]]);
+        };
+        const int nvalid = [&]{
+            int nv = 0;
+            for (int j = 0; j < n_kv_fa; j++) if (fh(mask, mfull, j, q_tok, 0) != -INFINITY) nv++;
+            return nv;
+        }();
+        std::vector<float> qh(d_head_q), outh(d_head_v);
+        ggml_backend_tensor_get(q, qh.data(), 0, ggml_nbytes(q));
+        clEnqueueReadBuffer(backend_ctx->queue, ed->data_device, CL_TRUE, od + (cl_ulong)q_tok*dst->nb[1] + 0*dst->nb[2], d_head_v*4, outh.data(), 0, NULL, NULL);
+        clFinish(backend_ctx->queue);
+        fprintf(stderr, "  DBG FAV: n_kv=%d dk=%d nh=%d nhkv=%d nvalid=%d q[0..3]=%.5f %.5f %.5f %.5f\n",
+            n_kv_fa, d_head_q, n_head, n_head_kv, nvalid, qh[0], qh[1], qh[2], qh[3]);
+        float m = -1e30f;
+        std::vector<float> scores(n_kv_fa), pr(n_kv_fa);
+        for (int j = 0; j < n_kv_fa; j++) {
+            float s = 0.0f;
+            for (int i = 0; i < d_head_q; i++) s += qh[i] * fh(k, kfull, i, j, kv_head);
+            s = s * scale_fa + fh(mask, mfull, j, q_tok, 0);
+            scores[j] = s;
+            m = fmaxf(m, s);
+        }
+        float sum = 0.0f;
+        for (int j = 0; j < n_kv_fa; j++) { pr[j] = expf(scores[j] - m); sum += pr[j]; }
+        for (int j = 0; j < n_kv_fa; j++) pr[j] /= sum;
+        int topj = 0; for (int j = 1; j < n_kv_fa; j++) if (pr[j] > pr[topj]) topj = j;
+        float hout[4] = {0,0,0,0};
+        for (int j = 0; j < n_kv_fa; j++)
+            for (int i = 0; i < 4; i++) hout[i] += pr[j] * fh(v, vfull, i, j, kv_head);
+        fprintf(stderr, "  DBG FAV: q[0..7]=%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
+            qh[0], qh[1], qh[2], qh[3], qh[4], qh[5], qh[6], qh[7]);
+        fprintf(stderr, "  DBG FAV: K pos0[0..7]=%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+            fh(k, kfull, 0, 0, kv_head), fh(k, kfull, 1, 0, kv_head), fh(k, kfull, 2, 0, kv_head), fh(k, kfull, 3, 0, kv_head),
+            fh(k, kfull, 4, 0, kv_head), fh(k, kfull, 5, 0, kv_head), fh(k, kfull, 6, 0, kv_head), fh(k, kfull, 7, 0, kv_head));
+        fprintf(stderr, "  DBG FAV: K pos7[0..7]=%.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f\n",
+            fh(k, kfull, 0, 7, kv_head), fh(k, kfull, 1, 7, kv_head), fh(k, kfull, 2, 7, kv_head), fh(k, kfull, 3, 7, kv_head),
+            fh(k, kfull, 4, 7, kv_head), fh(k, kfull, 5, 7, kv_head), fh(k, kfull, 6, 7, kv_head), fh(k, kfull, 7, 7, kv_head));
+        fprintf(stderr, "  DBG FAV: top kv pos=%d prob=%.4f score=%.3f\n", topj, pr[topj], scores[topj]);
+        fprintf(stderr, "  DBG FAV: manual-out[0..3]=%.5f %.5f %.5f %.5f  fa-out[0..3]=%.5f %.5f %.5f %.5f\n",
+            hout[0], hout[1], hout[2], hout[3], outh[0], outh[1], outh[2], outh[3]);
+    }
 }
 
 static void ggml_cl_mul_mat_f16_f32_tiled(ggml_backend_t backend, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
@@ -20458,9 +20541,9 @@ static void ggml_cl_mul_mat_q8_0_f32_adreno(ggml_backend_t backend, const ggml_t
             size_t global_work_size[] = { 64, (size_t)CEIL_DIV(M, 64), (size_t)CEIL_DIV(N, 64)};
             size_t local_work_size[]  = { 64, 2, 2 };
 
-            backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
-            CL_CHECK(clReleaseMemObject(b_sub_buf));
+        CL_CHECK(clReleaseMemObject(b_sub_buf));
             CL_CHECK(clReleaseMemObject(d_sub_buf));
             CL_CHECK(clReleaseMemObject(a_img));
             CL_CHECK(clReleaseMemObject(s_img));
@@ -20891,8 +20974,8 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
             size_t gr[3] = {(size_t)CEIL_DIV(ne01, 64) * 64, 1, 1};
             backend_ctx->enqueue_ndrange_kernel(kr, 3, gr, lr, dst);
 
-            if (q_img) CL_CHECK(clReleaseMemObject(q_img));
-            CL_CHECK(clReleaseMemObject(b_sub_buf));
+if (q_img) CL_CHECK(clReleaseMemObject(q_img));
+        CL_CHECK(clReleaseMemObject(b_sub_buf));
             CL_CHECK(clReleaseMemObject(b_img));
             return;
         }
@@ -21226,6 +21309,69 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         }
 
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+
+        static int dbg_tr = 0;
+        if (getenv("GGML_OPENCL_TRANSPOSE_VERIFY") && dbg_tr < 2 && N == 2 && K == 2048) {
+            dbg_tr++;
+            clFinish(backend_ctx->queue);
+            const size_t img_w = (size_t) K * (N + padding) / 4;
+            size_t ori[3] = {0,0,0}, reg[3] = {img_w, 1, 1};
+            std::vector<ggml_fp16_t> img(img_w * 4);
+            clEnqueueReadImage(backend_ctx->queue, b_img_trans, CL_TRUE, ori, reg, 0, 0, img.data(), 0, NULL, NULL);
+            std::vector<float> x((size_t) K * N);
+            ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+            const int prows = (N + padding) / 4;
+            fprintf(stderr, "  DBG TRV: K=%d N=%d padding=%d img_w=%zu\n", K, N, padding, img_w);
+            for (int ki = 0; ki < 4; ki++) {
+                float host0 = x[(size_t) ki*N + 0], host1 = x[(size_t) ki*N + 1];
+                float img0 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 0]);
+                float img1 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 1]);
+                fprintf(stderr, "  DBG TRV: ki=%d host[t0]=%.5f t1=%.5f  img[t0]=%.5f t1=%.5f\n",
+                    ki, host0, host1, img0, img1);
+            }
+        }
+
+        static int dbg_soa = 0;
+        if (getenv("GGML_OPENCL_SOA_VERIFY") && dbg_soa < 2 && N == 2 && (K == 2048 || K == 1024)) {
+            dbg_soa++;
+            clFinish(backend_ctx->queue);
+            const int M = ne01;
+            const int nblk = K / 256;
+            std::vector<uint16_t> q((size_t) (K/4) * M);
+            std::vector<uint8_t>  s((size_t) nblk * 12 * M);
+            std::vector<ggml_fp16_t> d((size_t) nblk * M), dm((size_t) nblk * M);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q4_k->q,  CL_TRUE, 0, q.size()*2,  q.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q4_k->s,  CL_TRUE, 0, s.size(),    s.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q4_k->d,  CL_TRUE, 0, d.size()*2,  d.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q4_k->dm, CL_TRUE, 0, dm.size()*2, dm.data(), 0, NULL, NULL);
+            std::vector<float> x((size_t) K * N);
+            ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+            std::vector<float> g((size_t) M * N);
+            ggml_backend_tensor_get(dst, g.data(), 0, ggml_nbytes(dst));
+            for (int i = 0; i < M; i++) {
+                double h0 = 0, h1 = 0;
+                for (int ki = 0; ki < K; ki++) {
+                    const int sb = ki / 256, sub = (ki % 256) / 32;
+                    const float dd  = ggml_fp16_to_fp32(d[(size_t) sb*M + i]);
+                    const float dmm = ggml_fp16_to_fp32(dm[(size_t) sb*M + i]);
+                    const uint8_t * sc = &s[(size_t) sb*12*M + i];
+                    int sv, mn;
+                    if (sub < 4) { sv = sc[sub*M] & 0x3F; mn = sc[(sub+4)*M] & 0x3F; }
+                    else { sv = (sc[(sub+4)*M] & 0x0F) | ((sc[(sub-4)*M] & 0xC0) >> 2);
+                           mn = ((sc[(sub+4)*M] >> 4) & 0x0F) | ((sc[sub*M] & 0xC0) >> 2); }
+                    const uint16_t bits = q[(size_t) (ki/4)*M + i];
+                    const int qv = (bits >> ((ki & 3) * 4)) & 0xF;
+                    const float w = qv * dd * (float)sv - dmm * (float)mn;
+                    h0 += w * x[(size_t) ki*N + 0];
+                    h1 += w * x[(size_t) ki*N + 1];
+                }
+                const double e0 = h0 - g[(size_t) i + 0*M], e1 = h1 - g[(size_t) i + 1*M];
+                if (fabs(e0) > 0.5 || fabs(e1) > 0.5) {
+                    fprintf(stderr, "  DBG SOA: BIG i=%d host[j0]=%.6f gpu[j0]=%.6f e0=%.6f  host[j1]=%.6f gpu[j1]=%.6f e1=%.6f\n",
+                        i, h0, g[(size_t) i + 0*M], e0, h1, g[(size_t) i + 1*M], e1);
+                }
+            }
+        }
         if (q_img) CL_CHECK(clReleaseMemObject(q_img));
         CL_CHECK(clReleaseMemObject(b_sub_buf));
         CL_CHECK(clReleaseMemObject(b_sub_buf_trans));
@@ -21552,6 +21698,25 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
             backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_size_t, local_size_t, dst);
         }
 
+        static int dbg_tr6 = 0;
+        if (getenv("GGML_OPENCL_TRV6_VERIFY") && dbg_tr6 < 2 && ne1 == 2 && ne00 == 2048) {
+            dbg_tr6++;
+            clFinish(backend_ctx->queue);
+            const size_t img_w = (size_t) ne00 * (ne1 + padding) / 4;
+            size_t ori[3] = {0,0,0}, reg[3] = {img_w, 1, 1};
+            std::vector<ggml_fp16_t> img(img_w * 4);
+            clEnqueueReadImage(backend_ctx->queue, b_img_trans, CL_TRUE, ori, reg, 0, 0, img.data(), 0, NULL, NULL);
+            std::vector<float> x((size_t) ne00 * ne1);
+            ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+            const int prows = (ne1 + padding) / 4;
+            for (int ki = 0; ki < 4; ki++) {
+                float h0 = x[(size_t) ki*ne1 + 0], h1 = x[(size_t) ki*ne1 + 1];
+                float i0 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 0]);
+                float i1 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 1]);
+                fprintf(stderr, "  DBG TRV6: ki=%d host[t0]=%.5f t1=%.5f  img[t0]=%.5f t1=%.5f\n", ki, h0, h1, i0, i1);
+            }
+        }
+
         // gemm
         // Cooperative-K small-batch (n_q in [2..8]) path: intra-WG K-split,
         // mirrors the q4_K _cok path (batched serving). OPT-IN
@@ -21604,6 +21769,44 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
         }
         backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
 
+        static int dbg_s6 = 0;
+        if (getenv("GGML_OPENCL_SOA6_VERIFY") && dbg_s6 < 2 && ne1 == 2 && ne00 == 2048) {
+            dbg_s6++;
+            clFinish(backend_ctx->queue);
+            const int m6 = ne01;
+            std::vector<uint16_t> ql((size_t) (ne00/4) * m6);
+            std::vector<uint8_t>  qh((size_t) (ne00/4) * m6);
+            std::vector<uint16_t> s6((size_t) (ne00/32) * m6);
+            std::vector<ggml_fp16_t> d6((size_t) (ne00/256) * m6);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q6_K->ql, CL_TRUE, 0, ql.size()*2, ql.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q6_K->qh, CL_TRUE, 0, qh.size(),   qh.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q6_K->s,  CL_TRUE, 0, s6.size()*2, s6.data(), 0, NULL, NULL);
+            clEnqueueReadBuffer(backend_ctx->queue, extra0_q6_K->d,  CL_TRUE, 0, d6.size()*2, d6.data(), 0, NULL, NULL);
+            std::vector<float> x((size_t) ne00 * ne1);
+            ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+            std::vector<float> g((size_t) m6 * ne1);
+            ggml_backend_tensor_get(dst, g.data(), 0, ggml_nbytes(dst));
+            for (int i = 0; i < 2; i++) {
+                double h0 = 0, h1 = 0;
+                for (int ki = 0; ki < ne00; ki++) {
+                    const int sb = ki / 256;
+                    const int b16 = ki / 16, q = b16 % 2;
+                    const int qi4 = ki % 4;
+                    const int vi = ki / 4;
+                    const uint16_t qlv = ql[(size_t) vi*m6 + i];
+                    const uint8_t  qhv = qh[(size_t) vi*m6 + i];
+                    const int v = ((qlv >> (qi4*4)) & 0xF) | (((qhv >> (qi4*2)) & 0x3) << 4);
+                    const uint16_t su = s6[(size_t) (ki/32)*m6 + i];
+                    const int sc = (int)((su >> (q*8)) & 0x3F);
+                    const float dd = ggml_fp16_to_fp32(d6[(size_t) sb*m6 + i]);
+                    const float w = (float)(v - 32) * (float)sc * dd;
+                    h0 += w * x[(size_t) ki*ne1 + 0];
+                    h1 += w * x[(size_t) ki*ne1 + 1];
+                }
+                fprintf(stderr, "  DBG SOA6: i=%d host[j0]=%.6f gpu[j0]=%.6f  host[j1]=%.6f gpu[j1]=%.6f\n",
+                    i, h0, g[(size_t) i + 0*m6], h1, g[(size_t) i + 1*m6]);
+            }
+        }
         CL_CHECK(clReleaseMemObject(b_sub_buf));
         CL_CHECK(clReleaseMemObject(b_img));
         CL_CHECK(clReleaseMemObject(b_buf_trans));
@@ -21797,6 +22000,26 @@ static void ggml_cl_mul_mat_q5_K_f32_adreno(ggml_backend_t backend, const ggml_t
             size_t local_work_size_t[2]  = {1, 16};
             size_t global_work_size_t[2] = {(size_t)width_B, (size_t)padded_height_B};
             backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+        }
+
+        static int dbg_tr5 = 0;
+        if (getenv("GGML_OPENCL_TRV5_VERIFY") && dbg_tr5 < 2 && N == 2 && K == 1024) {
+            dbg_tr5++;
+            clFinish(backend_ctx->queue);
+            const size_t img_w = (size_t) K * (N + padding) / 4;
+            size_t ori[3] = {0,0,0}, reg[3] = {img_w, 1, 1};
+            std::vector<ggml_fp16_t> img(img_w * 4);
+            clEnqueueReadImage(backend_ctx->queue, b_img_trans, CL_TRUE, ori, reg, 0, 0, img.data(), 0, NULL, NULL);
+            std::vector<float> x((size_t) K * N);
+            ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+            const int prows = (N + padding) / 4;
+            for (int ki = 0; ki < 4; ki++) {
+                float h0 = x[(size_t) ki*N + 0], h1 = x[(size_t) ki*N + 1];
+                float i0 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 0]);
+                float i1 = ggml_fp16_to_fp32(img[(size_t) ki*prows*4 + 1]);
+                fprintf(stderr, "  DBG TRV5: K=%d N=%d pad=%d ki=%d host[t0]=%.5f t1=%.5f  img[t0]=%.5f t1=%.5f\n",
+                    K, N, padding, ki, h0, h1, i0, i1);
+            }
         }
 
         // dp4a (int8) dense q5_K prefill GEMM
@@ -24466,6 +24689,33 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
             size_t local_work_size[] = {(size_t)nth0, (size_t)nth1, 1};
 
             backend_ctx->enqueue_ndrange_kernel(kernel, 3, global_work_size, local_work_size, dst);
+        }
+    }
+
+    static int dbg_mm = 0;
+    if (getenv("GGML_OPENCL_MULMAT_VERIFY") && dbg_mm < 4 && src1t == GGML_TYPE_F32 &&
+            ne10 == 2048 && ne11 <= 8 && ggml_is_quantized(src0->type)) {
+        dbg_mm++;
+        clFinish(backend_ctx->queue);
+        const int dout = (int) dst->ne[0];
+        std::vector<uint8_t> raw(ggml_nbytes(src0));
+        std::vector<float> w((size_t) dout * ne10);
+        ggml_backend_tensor_get(src0, raw.data(), 0, ggml_nbytes(src0));
+        ggml_get_type_traits(src0->type)->to_float(raw.data(), w.data(), (size_t) dout * ne10);
+        std::vector<float> x((size_t) ne10 * ne11);
+        std::vector<float> g((size_t) dout * ne11);
+        ggml_backend_tensor_get(src1, x.data(), 0, ggml_nbytes(src1));
+        ggml_backend_tensor_get(dst, g.data(), 0, ggml_nbytes(dst));
+        fprintf(stderr, "  DBG MMV: src0t=%d ne0=%d ne1=%d ne10=%d ne11=%d dout=%d\n",
+            (int) src0->type, (int) src0->ne[0], (int) src0->ne[1], ne10, ne11, dout);
+        for (int i = 0; i < 2; i++) {
+            float h0 = 0.0f, h1 = 0.0f;
+            for (int k = 0; k < ne10; k++) {
+                h0 += w[(size_t) i*ne10 + k] * x[(size_t) k*ne11 + 0];
+                h1 += w[(size_t) i*ne10 + k] * x[(size_t) k*ne11 + 1];
+            }
+            fprintf(stderr, "  DBG MMV: i=%d host[j0]=%.5f gpu[j0]=%.5f  host[j1]=%.5f gpu[j1]=%.5f\n",
+                i, h0, g[(size_t) i*ne11 + 0], h1, g[(size_t) i*ne11 + 1]);
         }
     }
 }
