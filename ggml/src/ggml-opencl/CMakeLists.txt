@@ -259,3 +259,8 @@ target_include_directories(opencl-test-q8_0 PRIVATE ${OpenCL_INCLUDE_DIRS})
 add_executable(opencl-test-fa test_fa_qwen.cpp)
 target_link_libraries(opencl-test-fa PRIVATE ggml-base ggml-cpu ggml-opencl ${OpenCL_LIBRARIES})
 target_include_directories(opencl-test-fa PRIVATE ${GGML_OPENCL_INCLUDE_DIRS})
+
+# Quantized->SoA conversion test (not for upstream)
+add_executable(opencl-test-convert-qk test_convert_qk.cpp)
+target_link_libraries(opencl-test-convert-qk PRIVATE ggml-base ggml-cpu ggml-opencl ${OpenCL_LIBRARIES})
+target_include_directories(opencl-test-convert-qk PRIVATE ${GGML_OPENCL_INCLUDE_DIRS})

@@ -10872,6 +10872,41 @@ static void ggml_backend_opencl_buffer_set_tensor(ggml_backend_buffer_t buffer, 
 
             // Transpose s as uchar
             transpose_2d_as_8b(backend_ctx, extra->s, extra->s, size_s, K/256*12, M, true, true);
+
+            static int dbg_cv = 0;
+            if (getenv("GGML_OPENCL_CONVERT_VERIFY") && dbg_cv < 2 && K == 1024 && M > 1000) {
+                dbg_cv++;
+                clFinish(backend_ctx->queue);
+                std::vector<ggml_fp16_t> d((size_t) (K/256)*M), dm((size_t) (K/256)*M);
+                std::vector<uint8_t> s((size_t) (K/256)*12*M);
+                std::vector<uint16_t> q((size_t) (K/4)*M);
+                clEnqueueReadBuffer(queue, extra->d,  CL_TRUE, 0, d.size()*2,  d.data(), 0, NULL, NULL);
+                clEnqueueReadBuffer(queue, extra->dm, CL_TRUE, 0, dm.size()*2, dm.data(), 0, NULL, NULL);
+                clEnqueueReadBuffer(queue, extra->s,  CL_TRUE, 0, s.size(),    s.data(), 0, NULL, NULL);
+                clEnqueueReadBuffer(queue, extra->q,  CL_TRUE, 0, q.size()*2,  q.data(), 0, NULL, NULL);
+                std::vector<float> stdq((size_t) K*M);
+                ggml_get_type_traits(GGML_TYPE_Q4_K)->to_float(data, stdq.data(), (int64_t)K*M);
+                float wmax = 0; int wmaxi = 0;
+                for (int i = 0; i < M; ++i) {
+                    for (int ki = 0; ki < K; ++ki) {
+                        const int sb = ki/256, sub = (ki%256)/32;
+                        const float dd = ggml_fp16_to_fp32(d[(size_t) sb*M+i]);
+                        const float dmm = ggml_fp16_to_fp32(dm[(size_t) sb*M+i]);
+                        const uint8_t * sc = &s[(size_t) sb*12*M + i];
+                        int sv, mn;
+                        if (sub < 4) { sv = sc[sub*M]&0x3F; mn = sc[(sub+4)*M]&0x3F; }
+                        else { sv = (sc[(sub+4)*M]&0x0F)|((sc[(sub-4)*M]&0xC0)>>2);
+                               mn = ((sc[(sub+4)*M]>>4)&0x0F)|((sc[sub*M]&0xC0)>>2); }
+                        const uint16_t bits = q[(size_t) (ki/4)*M+i];
+                        const int qv = (bits >> ((ki&3)*4)) & 0xF;
+                        const float w = qv*dd*sv - dmm*mn;
+                        const float e = fabsf(w - stdq[(size_t) i*K+ki]);
+                        if (e > wmax) { wmax = e; wmaxi = (int)((size_t) i*K+ki); }
+                    }
+                }
+                fprintf(stderr, "  DBG CV: K=%d M=%d wmax=%.6f worst[i=%d] (row=%d ki=%d)\n",
+                    K, M, wmax, wmaxi, wmaxi/K, wmaxi%K);
+            }
         }
 #endif // GGML_OPENCL_USE_ADRENO_KERNELS
         return;
