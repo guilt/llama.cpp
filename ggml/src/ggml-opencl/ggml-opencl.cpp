@@ -1200,6 +1200,7 @@ struct ggml_backend_opencl_context {
 
     cl_kernel kernel_transpose_32;
     cl_kernel kernel_transpose_32_16;
+    cl_kernel kernel_transpose_32_16_smalln;
     cl_kernel kernel_transpose_16;
     cl_kernel kernel_transpose_8_buf;
     cl_kernel kernel_transpose_16_buf;
@@ -3716,6 +3717,7 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
             build_program_from_source(backend_ctx, kernel_src.c_str(), compile_opts);
 
         CL_CHECK((backend_ctx->kernel_transpose_32_16 = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16", &err), err));
+        CL_CHECK((backend_ctx->kernel_transpose_32_16_smalln = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32_16_smalln", &err), err));
         CL_CHECK((backend_ctx->kernel_transpose_32    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_32", &err), err));
         CL_CHECK((backend_ctx->kernel_transpose_16    = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_16", &err), err));
         CL_CHECK((backend_ctx->kernel_transpose_8_buf  = clCreateKernel(backend_ctx->program_transpose, "kernel_transpose_8_buf", &err), err));
@@ -6751,6 +6753,18 @@ static void transpose_2d(
     CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_int), &rows));
 
     size_t local_size[3] = {64, 1, 1};
+    // The kernel processes one element per lane; stride (the x extent) can be
+    // smaller than 64 or not a multiple of it (e.g. K/256 or K/256*12 for
+    // small K). A workgroup larger than the extent makes the launch invalid on
+    // some drivers (or leaves lanes reading/writing out of bounds). Pick the
+    // largest power of two that divides stride.
+    if (!auto_local) {
+        int lx = 64;
+        while (lx > 1 && (stride % lx != 0)) {
+            lx >>= 1;
+        }
+        local_size[0] = (size_t) lx;
+    }
     size_t global_size[3] = {(size_t)stride, (size_t)rows, 1};;
     CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 3, NULL,
         global_size, auto_local ? NULL : local_size, 0, NULL, NULL));
@@ -20947,16 +20961,32 @@ static void ggml_cl_mul_mat_q4_k_f32_adreno(ggml_backend_t backend, const ggml_t
         int width_B = K/4;
         int padded_height_B = (N + padding)/4;
 
-        kernel = backend_ctx->kernel_transpose_32_16;
-        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
-        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
-        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
-        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
-        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
+        if (N < 4 && N >= 1) {
+            // N < 4: RGBA texel packing spans multiple token columns, the
+            // 4-token-per-texel transpose reads OOB. Use the scalar small-N
+            // transpose instead.
+            kernel = backend_ctx->kernel_transpose_32_16_smalln;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            const uint n_arg = (uint) N, k_arg = (uint) K;
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(uint), &n_arg));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(uint), &k_arg));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(uint), &padded_height_B));
+            size_t gs_sn[2] = { (size_t) K, (size_t) padded_height_B };
+            size_t ls_sn[2] = { 1, 1 };
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, gs_sn, ls_sn, dst);
+        } else {
+            kernel = backend_ctx->kernel_transpose_32_16;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
 
-        size_t local_work_size_t[2] = { 1, 16 };
-        size_t global_work_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
-        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+            size_t local_work_size_t[2] = { 1, 16 };
+            size_t global_work_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+        }
 
         // dp4a (int8) dense prefill GEMM and weight via texture
         static const char * q4k_dense_dp4a_env = getenv("GGML_OPENCL_Q4K_DENSE_DP4A");
@@ -21447,16 +21477,29 @@ static void ggml_cl_mul_mat_q6_K_f32_adreno(ggml_backend_t backend, const ggml_t
         int width_B = ne00/4;
         int padded_height_B = (ne1 + padding) / 4;
 
-        kernel = backend_ctx->kernel_transpose_32_16;
-        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
-        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
-        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
-        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
-        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
+        if (ne1 < 4 && ne1 >= 1) {
+            kernel = backend_ctx->kernel_transpose_32_16_smalln;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            const uint n_arg = (uint) ne1, k_arg = (uint) ne00;
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(uint), &n_arg));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(uint), &k_arg));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(uint), &padded_height_B));
+            size_t gs_sn[2] = { (size_t) ne00, (size_t) padded_height_B };
+            size_t ls_sn[2] = { 1, 1 };
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, gs_sn, ls_sn, dst);
+        } else {
+            kernel = backend_ctx->kernel_transpose_32_16;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
 
-        size_t local_size_t[2] = { 1, 16 };
-        size_t global_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
-        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_size_t, local_size_t, dst);
+            size_t local_size_t[2] = { 1, 16 };
+            size_t global_size_t[2] = { (size_t)width_B, (size_t)padded_height_B };
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_size_t, local_size_t, dst);
+        }
 
         // gemm
         // Cooperative-K small-batch (n_q in [2..8]) path: intra-WG K-split,
@@ -21681,16 +21724,29 @@ static void ggml_cl_mul_mat_q5_K_f32_adreno(ggml_backend_t backend, const ggml_t
         int width_B        = K / 4;
         int padded_height_B = (N + padding) / 4;
 
-        kernel = backend_ctx->kernel_transpose_32_16;
-        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
-        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
-        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
-        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
-        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
+        if (N < 4 && N >= 1) {
+            kernel = backend_ctx->kernel_transpose_32_16_smalln;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            const uint n_arg = (uint) N, k_arg = (uint) K;
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(uint), &n_arg));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(uint), &k_arg));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(uint), &padded_height_B));
+            size_t gs_sn[2] = { (size_t) K, (size_t) padded_height_B };
+            size_t ls_sn[2] = { 1, 1 };
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, gs_sn, ls_sn, dst);
+        } else {
+            kernel = backend_ctx->kernel_transpose_32_16;
+            CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &b_img));
+            CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &b_img_trans));
+            CL_CHECK(clSetKernelArg(kernel, 2, sizeof(int),    &height_B));
+            CL_CHECK(clSetKernelArg(kernel, 3, sizeof(int),    &width_B));
+            CL_CHECK(clSetKernelArg(kernel, 4, sizeof(int),    &padded_height_B));
 
-        size_t local_work_size_t[2]  = {1, 16};
-        size_t global_work_size_t[2] = {(size_t)width_B, (size_t)padded_height_B};
-        backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+            size_t local_work_size_t[2]  = {1, 16};
+            size_t global_work_size_t[2] = {(size_t)width_B, (size_t)padded_height_B};
+            backend_ctx->enqueue_ndrange_kernel(kernel, 2, global_work_size_t, local_work_size_t, dst);
+        }
 
         // dp4a (int8) dense q5_K prefill GEMM
         static const char * q5k_dense_dp4a_env = getenv("GGML_OPENCL_Q5K_DENSE_DP4A");
