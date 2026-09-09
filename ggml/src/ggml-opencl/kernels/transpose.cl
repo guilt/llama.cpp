@@ -54,7 +54,11 @@ kernel void kernel_transpose_8_buf(
     const int x = get_global_id(0);
     const int y = get_global_id(1);
 
-    output[x*ldo + y] = input[y*ldi + x];
+    // ldi can be smaller than the workgroup size or not a multiple of it, so
+    // bound the extra lanes that would read/write out of bounds.
+    if (x < ldi && y < ldo) {
+        output[x*ldo + y] = input[y*ldi + x];
+    }
 }
 
 // Transpose treating each element as 16-bit using buffer
@@ -67,7 +71,9 @@ kernel void kernel_transpose_16_buf(
     const int x = get_global_id(0);
     const int y = get_global_id(1);
 
-    output[x*ldo + y] = input[y*ldi + x];
+    if (x < ldi && y < ldo) {
+        output[x*ldo + y] = input[y*ldi + x];
+    }
 }
 
 // Transpose treating each element as 32-bit using buffer
@@ -80,7 +86,9 @@ kernel void kernel_transpose_32_buf(
     const int x = get_global_id(0);
     const int y = get_global_id(1);
 
-    output[x*ldo + y] = input[y*ldi + x];
+    if (x < ldi && y < ldo) {
+        output[x*ldo + y] = input[y*ldi + x];
+    }
 }
 
 // 32-bit transpose, loading/storing a 4x4 tile of elements
@@ -140,4 +148,26 @@ kernel void kernel_transpose_32_16(__read_only image1d_buffer_t input, __write_o
     write_imageh(output, (i_2+1)*padded_rows+j, (half4)(temp0.s1, temp1.s1, temp2.s1, temp3.s1));
     write_imageh(output, (i_2+2)*padded_rows+j, (half4)(temp0.s2, temp1.s2, temp2.s2, temp3.s2));
     write_imageh(output, (i_2+3)*padded_rows+j, (half4)(temp0.s3, temp1.s3, temp2.s3, temp3.s3));
+}
+
+// Small-N activation transpose (N < 4): the RGBA texel packing of the f32
+// input (4 floats per texel) spans multiple token columns when N < 4, so the
+// 4-token-per-texel reads of kernel_transpose_32_16 are invalid there. Read
+// individual (ki, token) elements instead.
+kernel void kernel_transpose_32_16_smalln(
+    __read_only image1d_buffer_t input,
+    __write_only image1d_buffer_t output,
+    const uint n,
+    const uint k,
+    const uint padded_rows
+) {
+    const int ki = get_global_id(0);
+    const int j  = get_global_id(1);
+    half v0 = 0, v1 = 0, v2 = 0, v3 = 0;
+    const int t0 = j*4 + 0, t1 = j*4 + 1, t2 = j*4 + 2, t3 = j*4 + 3;
+    if (t0 < (int)n) { const int idx = ki*n + t0; const float4 v = read_imagef(input, idx >> 2); const int comp = idx & 3; v0 = convert_half(comp == 0 ? v.x : comp == 1 ? v.y : comp == 2 ? v.z : v.w); }
+    if (t1 < (int)n) { const int idx = ki*n + t1; const float4 v = read_imagef(input, idx >> 2); const int comp = idx & 3; v1 = convert_half(comp == 0 ? v.x : comp == 1 ? v.y : comp == 2 ? v.z : v.w); }
+    if (t2 < (int)n) { const int idx = ki*n + t2; const float4 v = read_imagef(input, idx >> 2); const int comp = idx & 3; v2 = convert_half(comp == 0 ? v.x : comp == 1 ? v.y : comp == 2 ? v.z : v.w); }
+    if (t3 < (int)n) { const int idx = ki*n + t3; const float4 v = read_imagef(input, idx >> 2); const int comp = idx & 3; v3 = convert_half(comp == 0 ? v.x : comp == 1 ? v.y : comp == 2 ? v.z : v.w); }
+    write_imageh(output, ki*padded_rows + j, (half4)(v0, v1, v2, v3));
 }
