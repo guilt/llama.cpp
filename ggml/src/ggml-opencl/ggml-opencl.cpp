@@ -314,42 +314,29 @@ static ADRENO_GPU_GEN get_adreno_gpu_gen(const char *device_name) {
 }
 
 static ggml_cl_compiler_version get_adreno_cl_compiler_version(const char *driver_version) {
-    std::string driver_ver_str(driver_version);
-    ADRENO_CL_COMPILER_TYPE type = ADRENO_CL_COMPILER_TYPE::E031;
-    size_t compiler_ver_pos = driver_ver_str.find("E031");
-    size_t compiler_ver_len = 13;
-    size_t compiler_major_offset = 5;
-    size_t compiler_minor_offset = 8;
-    size_t compiler_patch_offset = 11;
-
-    if (compiler_ver_pos == std::string::npos) {
-        compiler_ver_pos = driver_ver_str.find("E17");
-        if (compiler_ver_pos != std::string::npos) {
-            type = ADRENO_CL_COMPILER_TYPE::E17;
-            compiler_ver_len = 12;
-            compiler_major_offset = 4;
-            compiler_minor_offset = 7;
-            compiler_patch_offset = 10;
-        }
-    }
-
-    if (compiler_ver_pos == std::string::npos) {
-        compiler_ver_pos = driver_ver_str.find("DX");
-        if (compiler_ver_pos == std::string::npos) {
+    int major = 0, minor = 0, patch = 0;
+    const char * p = strstr(driver_version, "E031");
+    if (p != nullptr) {
+        if (sscanf(p + 4, "%d.%d.%d", &major, &minor, &patch) != 3) {
             return {};
         }
-        type = ADRENO_CL_COMPILER_TYPE::DX;
-        compiler_ver_len = 11;
-        compiler_major_offset = 3;
-        compiler_minor_offset = 6;
-        compiler_patch_offset = 9;
+        return { ADRENO_CL_COMPILER_TYPE::E031, major, minor, patch };
     }
-
-    std::string compiler_ver_str = driver_ver_str.substr(compiler_ver_pos, compiler_ver_len);
-    int major = std::atoi(compiler_ver_str.substr(compiler_major_offset, 2).c_str());
-    int minor = std::atoi(compiler_ver_str.substr(compiler_minor_offset, 2).c_str());
-    int patch = std::atoi(compiler_ver_str.substr(compiler_patch_offset, 2).c_str());
-    return { type, major, minor, patch };
+    p = strstr(driver_version, "E17");
+    if (p != nullptr) {
+        if (sscanf(p + 3, "%d.%d.%d", &major, &minor, &patch) != 3) {
+            return {};
+        }
+        return { ADRENO_CL_COMPILER_TYPE::E17, major, minor, patch };
+    }
+    p = strstr(driver_version, "DX");
+    if (p != nullptr) {
+        if (sscanf(p + 2, "%d.%d.%d", &major, &minor, &patch) != 3) {
+            return {};
+        }
+        return { ADRENO_CL_COMPILER_TYPE::DX, major, minor, patch };
+    }
+    return {};
 }
 
 // cl buffer wrapper
@@ -674,6 +661,11 @@ struct ggml_backend_opencl_context {
     ggml_cl_compiler_version adreno_cl_compiler_version;
     // The q6_K flat mul_mat codegen workarounds are needed by old E031 compilers only.
     bool q6_k_flat_old_compiler;
+    // The E031 compiler miscompiles the noshuffle q4_K/q5_K/q6_K GEMM kernels for
+    // ne[1] >= 512 (NMSE ~2, sign flips) and the generic mul_mv_q*_K_f32 kernels
+    // deviate from the CPU dequant for ne[1] >= 512 (~4%, data-dependent). Both are
+    // routed to the flat/CPU paths based on this flag.
+    bool noshuffle_gemm_m512_broken;
 
     std::string kernel_compile_opts;  // cached for lazy-compiled kernels.
 
@@ -6537,6 +6529,12 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
         backend_ctx->adreno_cl_compiler_version.type == E031 &&
         !backend_ctx->adreno_cl_compiler_version.newer_than_or_same(E031, 45, 0, 0);
 
+    // Same E031 family. The noshuffle GEMM and generic mul_mv deviations are
+    // compiler defects, not GPU-generation properties; the m>=512 routing below
+    // keys off this single flag.
+    backend_ctx->noshuffle_gemm_m512_broken =
+        backend_ctx->adreno_cl_compiler_version.type == E031;
+
     size_t ext_str_size;
     clGetDeviceInfo(device, CL_DEVICE_EXTENSIONS, 0, NULL, &ext_str_size);
     char *ext_buffer = (char *)alloca(ext_str_size + 1);
@@ -8496,6 +8494,13 @@ inline bool enable_adreno_trans_weight_q5_K(const ggml_backend_opencl_context *b
         return false;
     }
 
+    // Same E031.45 noshuffle GEMM bug as q4_K/q6_K: wrong results for ne[1] >= 512.
+    // Use the generic (flat) path instead.
+    if (backend_ctx->noshuffle_gemm_m512_broken &&
+        tensor->ne[1] >= 512 && tensor->ne[2] == 1 && tensor->ne[3] == 1) {
+        return false;
+    }
+
     const size_t elem_num = ggml_nelements(tensor);
     const size_t q_img_width = elem_num / 8;
     const size_t qh_img_width = elem_num / 16;
@@ -8543,6 +8548,15 @@ static inline bool use_flat_gemv_for_large_m_q4_K(const ggml_backend_opencl_cont
         return true;
     }
 
+    // FIXME(workaround): the noshuffle q4_K GEMM/GEMV kernels give wrong results
+    // for ne[1] >= 512 on this Adreno (E031.45). The flat path is correct.
+    // test-backend-ops fails q4_K/q5_K/q6_K MUL_MAT (NMSE ~2, sign flips) for
+    // m >= 512 while m <= 256 is fine and the flat path is exact.
+    if (backend_ctx->noshuffle_gemm_m512_broken &&
+        tensor->ne[1] >= 512 && tensor->ne[2] == 1 && tensor->ne[3] == 1) {
+        return true;
+    }
+
     if (!flat_large_m_enabled()) {
         return false;
     }
@@ -8582,6 +8596,13 @@ static inline bool use_flat_gemv_for_large_m_q6_K(const ggml_backend_opencl_cont
     // to CPU (see supports_op). All standard even-vocab/hidden dims are multiples of
     // 128 and keep the noshuffle path.
     if ((tensor->ne[1] % 128 != 0) && tensor->ne[2] == 1 && tensor->ne[3] == 1) {
+        return true;
+    }
+
+    // Same E031.45 noshuffle GEMM bug as q4_K: wrong results for ne[1] >= 512.
+    // Route to the flat path.
+    if (backend_ctx->noshuffle_gemm_m512_broken &&
+        tensor->ne[1] >= 512 && tensor->ne[2] == 1 && tensor->ne[3] == 1) {
         return true;
     }
 
@@ -8881,6 +8902,15 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                                                 t == GGML_TYPE_Q6_K);
                     const bool uses_gemm = type_has_gemm && use_adreno_kernels(backend_ctx, op->src[0]);
                     if (!uses_gemm && op->src[1]->ne[1] >= 512) {
+                        return false;
+                    }
+                    // The generic mul_mv_q*_K_f32 kernels deviate from the CPU dequant
+                    // (up to ~4%, data-dependent) for weights with ne[1] >= 512 on the
+                    // E031 compiler. The m>=512 q4_K/q5_K/q6_K weights now route to
+                    // that generic (flat) path, so send them to CPU for exactness.
+                    if (backend_ctx->noshuffle_gemm_m512_broken &&
+                        (t == GGML_TYPE_Q4_K || t == GGML_TYPE_Q5_K || t == GGML_TYPE_Q6_K) &&
+                        op->src[0]->ne[1] >= 512) {
                         return false;
                     }
                 }
