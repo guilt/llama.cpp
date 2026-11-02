@@ -11494,14 +11494,13 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
         case GGML_OP_CPY:
         case GGML_OP_DUP:
         case GGML_OP_CONT:
+            // bf16/q8_0 conversion kernels only handle flat contiguous data
             switch (op->src[0]->type) {
                 case GGML_TYPE_F32:
                     switch (op->type) {
                         case GGML_TYPE_I32:
                         case GGML_TYPE_F16:
                         case GGML_TYPE_F32:
-                        case GGML_TYPE_BF16:
-                        case GGML_TYPE_Q8_0:
                             return true;
                         default:
                             return false;
@@ -11510,8 +11509,6 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
                     switch (op->type) {
                         case GGML_TYPE_F16:
                         case GGML_TYPE_F32:
-                        case GGML_TYPE_BF16:
-                        case GGML_TYPE_Q8_0:
                             return true;
                         default:
                             return false;
